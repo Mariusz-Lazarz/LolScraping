@@ -1,4 +1,5 @@
 const puppeteer = require("puppeteer");
+const axios = require("axios");
 
 const scrapeScript = async () => {
   let browser;
@@ -49,7 +50,14 @@ const scrapeScript = async () => {
     if (data.length === 0) {
       throw new Error("No data found on the page");
     }
-    console.log(data);
+    const response = await axios.put(
+      "https://react-ffef8-default-rtdb.europe-west1.firebasedatabase.app/matches.json",
+      data
+    );
+    if (response.status !== 200) {
+      throw new Error("Failed to update the database");
+    }
+    console.log("Data sent to Firebase successfully");
     return data;
   } catch (error) {
     throw new Error(`Scraping failed: ${error.message}`);
