@@ -1,75 +1,122 @@
-const puppeteer = require("puppeteer");
+const chromium = require("chrome-aws-lambda");
 const axios = require("axios");
 
-const scrapeScript = async () => {
-  let browser;
-  try {
-    browser = await puppeteer.launch({ headless: "new" });
-    const context = await browser.createIncognitoBrowserContext();
-    const page = await context.newPage();
-
-    await page.goto("https://lolesports.com/schedule?leagues=lec", {
-      waitUntil: "networkidle0",
-    });
-
-    await page.waitForSelector(".EventDate, .EventMatch", { timeout: 5000 });
-
-    const data = await page.evaluate(() => {
-      const nodes = Array.from(
-        document.querySelectorAll(".EventDate, .EventMatch")
-      );
-      const results = [];
-      let currentDate = null;
-
-      nodes.forEach((node) => {
-        if (node.matches(".EventDate")) {
-          currentDate = node.textContent;
-        } else if (currentDate && node.matches(".EventMatch")) {
-          const team1 =
-            node.querySelector(".team1 span.name")?.textContent || "N/A";
-          const team2 =
-            node.querySelector(".team2 span.name")?.textContent || "N/A";
-          const score = node.querySelector(".score")?.textContent || "N/A";
-
-          const existingDateObj = results.find(
-            (result) => result.date === currentDate
-          );
-          if (existingDateObj) {
-            existingDateObj.matches.push({ team1, team2, score });
-          } else {
-            results.push({
-              date: currentDate,
-              matches: [{ team1, team2, score }],
-            });
-          }
-        }
-      });
-      return results;
-    });
-
-    if (data.length === 0) {
-      throw new Error("No data found on the page");
-    }
-    const response = await axios.put(
-      "https://react-ffef8-default-rtdb.europe-west1.firebasedatabase.app/matches.json",
-      data
+const scrapeData = async (page) => {
+  return page.evaluate(() => {
+    const matches = [];
+    const eventDateElements = document.querySelectorAll(
+      ".EventDate, .EventMatch"
     );
-    if (response.status !== 200) {
-      throw new Error("Failed to update the database");
-    }
-    console.log("Data sent to Firebase successfully");
-    return data;
+
+    let currentDate = null;
+
+    eventDateElements.forEach((element) => {
+      if (element.classList.contains("EventDate")) {
+        const dateText = element.textContent;
+        let date = new Date();
+
+        if (dateText.includes("Yesterday")) {
+          date.setDate(date.getDate() - 1);
+        } else if (dateText.includes("Tomorrow")) {
+          date.setDate(date.getDate() + 1);
+        } else if (!dateText.includes("Today")) {
+          currentDate = dateText;
+        } else {
+          currentDate = date.toLocaleDateString("en-GB", {
+            weekday: "long",
+            month: "long",
+            day: "numeric",
+          });
+        }
+
+        matches.push({ date: currentDate, matches: [] });
+      } else if (currentDate && !element.querySelector(".live")) {
+        const matchElement = element.querySelector(".EventMatch .teams");
+        if (!matchElement) return;
+
+        const matchClasses = matchElement.classList;
+        const hasWinner =
+          matchClasses.contains("winner-team1") ||
+          matchClasses.contains("winner-team2");
+
+        const team1 =
+          matchElement.querySelector(".team.team1 h2 .name")?.textContent ||
+          "N/A";
+        const iconTeam1 =
+          matchElement.querySelector(".team.team1 img")?.src || "No IMG";
+        const score1 =
+          matchElement.querySelector(".score .scoreTeam1")?.textContent ||
+          "N/A";
+
+        const team2 =
+          matchElement.querySelector(".team.team2 h2 .name")?.textContent ||
+          "N/A";
+        const iconTeam2 =
+          matchElement.querySelector(".team.team2 img")?.src || "No IMG";
+        const score2 =
+          matchElement.querySelector(".score .scoreTeam2")?.textContent ||
+          "N/A";
+
+        const winner = hasWinner
+          ? matchClasses.contains("winner-team2")
+            ? team2
+            : team1
+          : "";
+
+        matches[matches.length - 1].matches.push({
+          Winner: winner,
+          Team1: team1,
+          Icon1: iconTeam1,
+          Score1: score1,
+          Score2: score2,
+          Team2: team2,
+          Icon2: iconTeam2,
+        });
+      }
+    });
+
+    return matches;
+  });
+};
+
+const sendDataToFirebase = async (data) => {
+  const response = await axios.put(
+    "https://react-ffef8-default-rtdb.europe-west1.firebasedatabase.app/matches.json",
+    data
+  );
+
+  if (response.status !== 200) {
+    throw new Error("Failed to update the database");
+  }
+};
+
+exports.handler = async (event, context, callback) => {
+  let browser = null;
+
+  try {
+    browser = await chromium.puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath,
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
+    });
+
+    const page = await browser.newPage();
+    await page.goto("https://lolesports.com/schedule?leagues=lec");
+    await page.waitForSelector(".EventDate");
+    const data = await scrapeData(page);
+    await sendDataToFirebase(data);
+
+    return callback(null, {
+      message: "Data scraped and sent to Firebase successfully",
+      data,
+    });
   } catch (error) {
-    throw new Error(`Scraping failed: ${error.message}`);
+    return callback(error);
   } finally {
-    if (browser) {
+    if (browser !== null) {
       await browser.close();
     }
   }
 };
-
-if (require.main === module) {
-  scrapeScript().catch((error) => console.error(error));
-}
-
-module.exports = scrapeScript;
