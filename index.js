@@ -1,5 +1,7 @@
 const chromium = require("chrome-aws-lambda");
-const axios = require("axios");
+const moment = require("moment");
+const { db } = require("./firebase");
+const { ref, set, get } = require("firebase/database");
 
 const scrapeData = async (page) => {
   return page.evaluate(() => {
@@ -12,24 +14,7 @@ const scrapeData = async (page) => {
 
     eventDateElements.forEach((element) => {
       if (element.classList.contains("EventDate")) {
-        const dateText = element.textContent;
-        let date = new Date();
-
-        if (dateText.includes("Yesterday")) {
-          date.setDate(date.getDate() - 1);
-        } else if (dateText.includes("Tomorrow")) {
-          date.setDate(date.getDate() + 1);
-        } else if (!dateText.includes("Today")) {
-          currentDate = dateText;
-        } else {
-          currentDate = date.toLocaleDateString("en-GB", {
-            weekday: "long",
-            month: "long",
-            day: "numeric",
-          });
-        }
-
-        matches.push({ date: currentDate, matches: [] });
+        currentDate = element.textContent.trim();
       } else if (currentDate && !element.querySelector(".live")) {
         const matchElement = element.querySelector(".EventMatch .teams");
         if (!matchElement) return;
@@ -57,40 +42,82 @@ const scrapeData = async (page) => {
           matchElement.querySelector(".score .scoreTeam2")?.textContent ||
           "N/A";
 
+        const league =
+          element.querySelector(".event .league .name")?.textContent || "N/A";
+        const format =
+          element.querySelector(".event .league .strategy")?.textContent ||
+          "N/A";
+
         const winner = hasWinner
           ? matchClasses.contains("winner-team2")
             ? team2
             : team1
           : "";
 
-        matches[matches.length - 1].matches.push({
-          Winner: winner,
-          Team1: team1,
-          Icon1: iconTeam1,
-          Score1: score1,
-          Score2: score2,
-          Team2: team2,
-          Icon2: iconTeam2,
-        });
+        const parts = currentDate.split(/[-–]/);
+        if (parts.length > 1) {
+          const dayMonth = parts[1].trim() + " " + new Date().getFullYear();
+          const hour =
+            element.querySelector(".event .EventTime .time .hour")
+              ?.textContent || "00";
+          const minute =
+            element.querySelector(".event .EventTime .time .minute")
+              ?.textContent || "00";
+          const fullDateStr = dayMonth + " " + hour + ":" + minute;
+
+          matches.push({
+            date: fullDateStr,
+            winner: winner,
+            team1: team1,
+            iconTeam1: iconTeam1,
+            score1: score1,
+            team2: team2,
+            iconTeam2: iconTeam2,
+            score2: score2,
+            league: league,
+            format: format,
+            timestamp: new Date(),
+          });
+        }
       }
     });
-
     return matches;
   });
 };
 
-const sendDataToFirebase = async (data) => {
-  const response = await axios.put(
-    "https://react-ffef8-default-rtdb.europe-west1.firebasedatabase.app/matches.json",
-    data
-  );
+const saveDataToFirebase = async (data) => {
+  for (const match of data) {
+    try {
+      // Parse the date using the German format with a dot
+      const parsedDate = moment(match.date, "DD. MMMM YYYY HH:mm", "de");
 
-  if (response.status !== 200) {
-    throw new Error("Failed to update the database");
+      // Convert the parsed date to UTC and format it as an ISO 8601 string
+      const formattedDate = parsedDate.utc().format("YYYY-MM-DDTHH:mm:ss[Z]");
+      match.date = formattedDate; // This will now be in UTC+0 format
+      match.timezone = "UTC"; // Indicate that the timezone is UTC
+
+      const matchId = `${match.Team1}-${match.Team2}-${formattedDate}`
+        .replace(/\s+/g, "-")
+        .toLowerCase()
+        .replace(/:/g, "-")
+        .replace(/\./g, ""); // Ensure no invalid characters for Firebase path
+
+      const matchRef = ref(db, `matches/${matchId}`);
+
+      const matchSnapshot = await get(matchRef);
+      if (!matchSnapshot.exists()) {
+        await set(matchRef, match);
+        console.log("Match saved successfully with ID:", matchId);
+      } else {
+        console.log("Match already exists, skipping...", matchId);
+      }
+    } catch (error) {
+      console.log("Error checking or saving match.", error);
+    }
   }
 };
 
-exports.handler = async (event, context, callback) => {
+exports.handler = async (event, context) => {
   let browser = null;
 
   try {
@@ -106,14 +133,23 @@ exports.handler = async (event, context, callback) => {
     await page.goto("https://lolesports.com/schedule?leagues=lec");
     await page.waitForSelector(".EventDate");
     const data = await scrapeData(page);
-    await sendDataToFirebase(data);
 
-    return callback(null, {
-      message: "Data scraped and sent to Firebase successfully",
-      data,
-    });
+    // Make sure saveDataToFirebase resolves before proceeding
+    await saveDataToFirebase(data);
+
+    // Return the response directly without using callback
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        message: "Data scraped and sent to Firebase successfully",
+      }),
+    };
   } catch (error) {
-    return callback(error);
+    console.error("An error occurred:", error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: error.message }),
+    };
   } finally {
     if (browser !== null) {
       await browser.close();
