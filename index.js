@@ -96,11 +96,12 @@ const saveDataToFirebase = async (data) => {
       match.date = formattedDate; // This will now be in UTC+0 format
       match.timezone = "UTC"; // Indicate that the timezone is UTC
 
-      const matchId = `${match.Team1}-${match.Team2}-${formattedDate}`
-        .replace(/\s+/g, "-")
-        .toLowerCase()
-        .replace(/:/g, "-")
-        .replace(/\./g, ""); // Ensure no invalid characters for Firebase path
+      const matchId =
+        `${match.team1}-${match.team2}-${match.date}-${match.league}-${match.format}`
+          .replace(/\s+/g, "-")
+          .toLowerCase()
+          .replace(/:/g, "-")
+          .replace(/\./g, "");
 
       const matchRef = ref(db, `matches/${matchId}`);
 
@@ -130,6 +131,9 @@ exports.handler = async (event, context) => {
     });
 
     const page = await browser.newPage();
+    // await page.setExtraHTTPHeaders({
+    //   "Accept-Language": "en-US", // Set the language to English
+    // });
     await page.goto("https://lolesports.com/schedule?leagues=lec");
     await page.waitForSelector(".EventDate");
     const data = await scrapeData(page);
